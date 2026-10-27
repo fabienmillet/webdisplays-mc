@@ -177,9 +177,10 @@ public class AnnoCFG {
 				handle.set(o);
 
 				//noinspection FunctionalExpressionCanBeFolded
-				handles.put(dir + "." + nameStr, new ConfigEntry(
-						handle, value::get
-				));
+				ConfigEntry entry = new ConfigEntry(handle, value::get);
+				if (value instanceof ModConfigSpec.ConfigValue<?> cv)
+					entry.value = cv;
+				handles.put(dir + "." + nameStr, entry);
 			}
 		}
 
@@ -220,6 +221,32 @@ public class AnnoCFG {
 			try {
 				postInit.invoke(null);
 				Log.dbg("config-evt", "postLoad invoked");
+			} catch (Throwable err) {
+				err.printStackTrace();
+			}
+		}
+	}
+
+	/**
+	 * Changes a value at runtime (e.g. from an in-game slider): updates the static field and the
+	 * spec, then re-runs postLoad. Written to disk only if {@code save} is true.
+	 *
+	 * @param path the value's path, e.g. "audio_max_volume_percent" or "input.switch_buttons"
+	 */
+	@SuppressWarnings({"unchecked", "rawtypes"})
+	public void set(String path, Object v, boolean save) {
+		ConfigEntry entry = handles.get("." + path);
+		if (entry == null || entry.value == null)
+			throw new IllegalArgumentException("No writable config value " + path);
+
+		((ModConfigSpec.ConfigValue) entry.value).set(v);
+		entry.handle.set(v);
+		if (save)
+			entry.value.save();
+
+		if (postInit != null) {
+			try {
+				postInit.invoke(null);
 			} catch (Throwable err) {
 				err.printStackTrace();
 			}

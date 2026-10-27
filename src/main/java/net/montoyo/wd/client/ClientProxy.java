@@ -80,6 +80,7 @@ import net.montoyo.wd.utilities.Log;
 import net.montoyo.wd.utilities.Multiblock;
 import net.montoyo.wd.utilities.VideoType;
 import net.montoyo.wd.utilities.browser.WDBrowser;
+import net.montoyo.wd.utilities.browser.WDClientBrowser;
 import net.montoyo.wd.utilities.browser.handlers.DisplayHandler;
 import net.montoyo.wd.utilities.browser.handlers.WDRouter;
 import net.montoyo.wd.utilities.data.BlockSide;
@@ -596,59 +597,155 @@ public class ClientProxy extends SharedProxy implements ResourceManagerReloadLis
 			return;
 
 		int id = lastTracked % screenTracking.size();
-
 		ScreenBlockEntity tes = screenTracking.get(id);
 
-		if (!tes.getLevel().equals(ev.getLevel()))
-			return;
-		
+		// Always advance, even when skipping a screen from another level: returning before the
+		// increment used to pin the round-robin on that screen forever, freezing load/unload and
+		// audio for every other screen.
 		lastTracked++;
-		if (tes.getLevel() != mc.player.level()) {
+
+		Entity entity = getListener();
+		if (!tes.getLevel().equals(ev.getLevel())) {
+			// not this level's screen, skip
+		} else if (tes.getLevel() != mc.player.level()) {
 			// TODO: properly handle this
 			// probably gonna want a helper class for cross-dimensional distances
 			if (!tes.isLoaded())
 				tes.load();
-		} else {
-			Camera camera = mc.getEntityRenderDispatcher().camera;
-			Entity entity = null;
+		} else if (entity != null) {
+			double dist = distanceTo(tes, entity.getPosition(0));
 
-			// ide inspection says this is a bunch of constant expressions
-			// THIS IS NOT THE CASE
-			// a crash HAS occurred because of this going unchecked, and I'm confused about it
+			// Distance is squared blocks. Hysteresis: deactivate beyond unloadDistance²,
+			// (re)activate within loadDistance². In the band between the two, do nothing
+			// (avoids thrashing at the boundary). activate() and deactivate() are idempotent.
+			//
+			// Prior code gated all this behind isLoaded() which is the BE-alive flag, NOT the
+			// browser-active state — so once browsers were closed via deactivate(), the
+			// activate branch never re-fired (isLoaded stayed true), and the screen would
+			// never come back on when the player walked back into range.
+			if (dist > WebDisplays.INSTANCE.unloadDistance2)
+				tes.deactivate();
+			else if (dist <= WebDisplays.INSTANCE.loadDistance2)
+				tes.activate();
+			// else: hysteresis zone — keep current state
+		}
 
-			//noinspection ConstantValue
-			if (camera != null) entity = camera.getEntity();
-			//noinspection ConstantValue
-			if (entity == null) entity = mc.player;
-			//noinspection ConstantValue
-			if (entity != null) {
-				double dist = distanceTo(tes, entity.getPosition(0));
-
-				// Distance is squared blocks. Hysteresis: deactivate beyond unloadDistance²,
-				// (re)activate within loadDistance². In the band between the two, do nothing
-				// (avoids thrashing at the boundary). activate() and deactivate() are idempotent.
-				//
-				// Prior code gated all this behind isLoaded() which is the BE-alive flag, NOT the
-				// browser-active state — so once browsers were closed via deactivate(), the
-				// activate branch never re-fired (isLoaded stayed true), and the screen would
-				// never come back on when the player walked back into range.
-				if (dist > WebDisplays.INSTANCE.unloadDistance2) {
-					tes.deactivate();
-				} else if (dist <= WebDisplays.INSTANCE.loadDistance2) {
-					tes.activate();
-					if (ClientConfig.enableSpatialAudio) {
-						float masterVol = mc.options.getSoundSourceVolume(net.minecraft.sounds.SoundSource.MASTER);
-						tes.updateTrackDistance(dist, masterVol);
-					}
-				}
-				// else: hysteresis zone — keep current state
-			}
+		// Audio runs over ALL screens (not round-robin): with one screen per tick, a map with
+		// many screens only refreshed each one every few seconds.
+		if (ClientConfig.enableSpatialAudio && entity != null && ++audioTicks >= AUDIO_UPDATE_TICKS) {
+			audioTicks = 0;
+			updateScreenAudio(entity);
 		}
 
 		// Video sync tick - check and sync video playback
 		if (CommonConfig.VideoSync.enabled) {
 			tickVideoSync();
 		}
+	}
+
+	private int orphanSweepTicks = 0;
+
+	@Override
+	public boolean isInLoadRange(ScreenBlockEntity tes) {
+		Player player = mc.player;
+		if (player == null || player.level() != tes.getLevel()) return false;
+		return distanceTo(tes, player.position()) <= WebDisplays.INSTANCE.loadDistance2;
+	}
+
+	/**
+	 * Closes screen browsers that no live screen references anymore (screen removed, other
+	 * level, replaced browser, or disconnected: mc.level == null). Such browsers can't be
+	 * attenuated or closed by anything else and would keep playing audio anywhere.
+	 */
+	private void sweepOrphanBrowsers() {
+		for (WDClientBrowser b : WDClientBrowser.liveBrowsers()) {
+			ScreenBlockEntity be = b.getBe();
+			if (be == null || b.isCloseRequested()) continue; // minePad browser, or already closing
+
+			ScreenData scr = be.getScreen(b.getSide());
+			if (be.isRemoved() || mc.level == null || be.getLevel() != mc.level || scr == null || scr.browser != b) {
+				Log.warning("Closing orphaned screen browser for %s side %s", be.getBlockPos(), b.getSide());
+				b.close(true);
+				if (scr != null && scr.browser == b)
+					scr.browser = null;
+			}
+		}
+	}
+
+	private static final int AUDIO_UPDATE_TICKS = 4;
+	private int audioTicks = 0;
+
+	private Entity getListener() {
+		// camera/getEntity() HAS been null in the wild (crash report), despite IDE inspections
+		Camera camera = mc.getEntityRenderDispatcher().camera;
+		Entity entity = null;
+		//noinspection ConstantValue
+		if (camera != null) entity = camera.getEntity();
+		if (entity == null) entity = mc.player;
+		return entity;
+	}
+
+	/**
+	 * Updates spatial audio (distance + wall occlusion) of every active screen in the
+	 * listener's level. Screens without a browser are skipped by updateTrackDistance.
+	 */
+	private void updateScreenAudio(Entity listener) {
+		float masterVol = mc.options.getSoundSourceVolume(net.minecraft.sounds.SoundSource.MASTER);
+		Vec3 eye = listener.getEyePosition();
+
+		for (ScreenBlockEntity tes : screenTracking) {
+			if (tes.getLevel() != listener.level()) continue;
+
+			double dist = distanceTo(tes, listener.getPosition(0));
+			if (dist > WebDisplays.INSTANCE.unloadDistance2) continue;
+
+			float occlusion = 1.0f;
+			if (ClientConfig.audioWallOcclusion && !hasLineOfSight(tes, eye))
+				occlusion = (float) (ClientConfig.audioOccludedVolumePercent / 100.0);
+			tes.updateTrackDistance(dist, masterVol, occlusion);
+		}
+	}
+
+	/**
+	 * Audio wall occlusion: casts rays from the listener's eyes to the center and corners of
+	 * every screen face of this block entity. Screen blocks themselves never block a ray.
+	 * Returns false only if every ray is stopped by a block's collision shape, which means
+	 * the listener is in another room (or behind the wall the screen is mounted on).
+	 */
+	private static boolean hasLineOfSight(ScreenBlockEntity tes, Vec3 eye) {
+		Level level = tes.getLevel();
+		BlockPos origin = tes.getBlockPos();
+
+		for (int i = 0; i < tes.screenCount(); i++) {
+			ScreenData scr = tes.getScreen(i);
+			if (scr == null) continue;
+
+			int w = scr.size.x - 1;
+			int h = scr.size.y - 1;
+			int[][] samples = {{w / 2, h / 2}, {0, 0}, {w, 0}, {0, h}, {w, h}};
+
+			for (int[] s : samples) {
+				BlockPos target = origin.offset(
+						scr.side.right.x * s[0] + scr.side.up.x * s[1],
+						scr.side.right.y * s[0] + scr.side.up.y * s[1],
+						scr.side.right.z * s[0] + scr.side.up.z * s[1]);
+
+				if (!isRayBlocked(level, eye, Vec3.atCenterOf(target)))
+					return true;
+			}
+		}
+
+		return false;
+	}
+
+	private static boolean isRayBlocked(Level level, Vec3 from, Vec3 to) {
+		return BlockGetter.traverseBlocks(from, to, level, (lvl, pos) -> {
+			BlockState state = lvl.getBlockState(pos);
+			if (Multiblock.isScreenBlock(state.getBlock()))
+				return null;
+
+			return state.getCollisionShape(lvl, pos).clip(from, to, pos) != null ? Boolean.TRUE : null;
+		}, lvl -> Boolean.FALSE);
 	}
 
 	/**
@@ -931,7 +1028,12 @@ public class ClientProxy extends SharedProxy implements ResourceManagerReloadLis
 
 	@SubscribeEvent
 	public void onTick(ClientTickEvent.Post ev) {
-		
+		WDClientBrowser.tickPendingCloses();
+		if (++orphanSweepTicks >= 20) {
+			orphanSweepTicks = 0;
+			sweepOrphanBrowsers();
+		}
+
 		//Help
 		if (InputConstants.isKeyDown(Minecraft.getInstance().getWindow().getWindow(), GLFW.GLFW_KEY_F1)) {
 			if (!isF1Down) {

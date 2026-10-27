@@ -141,11 +141,23 @@ public class ScreenBlockEntity extends BlockEntity {
     @Override
     public void handleUpdateTag(CompoundTag tag, HolderLookup.Provider registries) {
         loadAdditional(tag, registries);
-        for (ScreenData screen : screens) {
-            if (screen.browser == null) screen.createBrowser(this, false);
-            if (screen.browser != null) screen.browser.loadURL(screen.url);
+        // Chunk data reaches the client far beyond load_distance: only open browsers for screens
+        // in range, the ClientProxy tracker activates the others when the player gets close.
+        // (Used to open one for every screen of every loaded chunk, all playing audio.)
+        if (isInLoadRange()) {
+            for (ScreenData screen : screens) {
+                if (screen.browser == null) screen.createBrowser(this, false);
+                if (screen.browser != null) screen.browser.loadURL(screen.url);
+            }
         }
         updateAABB();
+    }
+
+    /** CLIENT-SIDE: whether the local player is close enough for this screen to run a browser. */
+    private boolean isInLoadRange() {
+        // Goes through the proxy: touching Minecraft.player here makes the verifier load the
+        // client-only LocalPlayer class when this BE is registered, crashing dedicated servers.
+        return WebDisplays.PROXY.isInLoadRange(this);
     }
 
     @Override
@@ -294,7 +306,9 @@ public class ScreenBlockEntity extends BlockEntity {
                 scr.browser = null;
             }
             if (scr.browser == null) {
-                scr.createBrowser(this, false);
+                // out of range: the tracker opens it (with the new url) when the player gets close
+                if (isInLoadRange())
+                    scr.createBrowser(this, false);
             } else {
                 scr.browser.loadURL(weburl);
             }
@@ -639,11 +653,19 @@ public class ScreenBlockEntity extends BlockEntity {
      *
      * @param d              squared distance from camera/player to screen (as returned by SharedProxy.distanceTo)
      * @param masterVolume   Minecraft master sound-source volume, scaled 0..1
+     * @param occlusion      target wall-occlusion multiplier 0..1 (1 = clear line of sight)
      */
     // Throttle periodic audio status logging to once every ~3 sec per BE so logs aren't flooded.
     private long lastAudioStatusLogMs = 0;
+    // CLIENT-SIDE smoothed wall-occlusion multiplier. Moves toward the target by OCCLUSION_STEP
+    // per update so walking through a doorway fades the sound instead of cutting it.
+    // Negative = not yet initialized (snap to the first target, so a screen in another room
+    // doesn't blast for a second when it first loads).
+    private float audioOcclusion = -1.0f;
+    private static final float OCCLUSION_STEP = 0.25f;
+    private static final long VOLUME_REFRESH_MS = 1000;
 
-    public void updateTrackDistance(double d, float masterVolume) {
+    public void updateTrackDistance(double d, float masterVolume, float occlusion) {
         final WebDisplays wd = WebDisplays.INSTANCE;
         boolean needsComputation = true;
         int intPart = 0;
@@ -662,8 +684,8 @@ public class ScreenBlockEntity extends BlockEntity {
             if (dist <= wd.avDist100) volNow = masterVolume * wd.ytVolume;
             else if (dist >= wd.avDist0) volNow = 0.0f;
             else volNow = (1.0f - (dist - wd.avDist100) / (wd.avDist0 - wd.avDist100)) * masterVolume * wd.ytVolume;
-            Log.info("[audiodiag] BE@%s dist=%.2f vol=%.1f%% (master=%.2f, cfg full@%.1f silent@%.1f, load@%.1f unload@%.1f) screens=%d",
-                    worldPosition, dist, volNow, masterVolume, wd.avDist100, wd.avDist0,
+            Log.info("[audiodiag] BE@%s dist=%.2f vol=%.1f%% occlusion=%.2f->%.2f (master=%.2f, cfg full@%.1f silent@%.1f, load@%.1f unload@%.1f) screens=%d",
+                    worldPosition, dist, volNow, audioOcclusion, occlusion, masterVolume, wd.avDist100, wd.avDist0,
                     Math.sqrt(wd.loadDistance2), Math.sqrt(wd.unloadDistance2), screens.size());
             for (ScreenData scr : screens) {
                 String reason;
@@ -681,6 +703,11 @@ public class ScreenBlockEntity extends BlockEntity {
         else if (dist >= wd.avDist0) baseVol = 0.0f;
         else baseVol = (1.0f - (dist - wd.avDist100) / (wd.avDist0 - wd.avDist100)) * masterVolume * wd.ytVolume;
 
+        if (audioOcclusion < 0.0f) audioOcclusion = occlusion;
+        else if (audioOcclusion < occlusion) audioOcclusion = Math.min(occlusion, audioOcclusion + OCCLUSION_STEP);
+        else audioOcclusion = Math.max(occlusion, audioOcclusion - OCCLUSION_STEP);
+        baseVol *= audioOcclusion;
+
         for (ScreenData scr : screens) {
             // autoVolume + browser are required. videoType is OPTIONAL — when null, we fall back
             // to generic JS that sets volume on every <video>/<audio> element in the page
@@ -695,9 +722,11 @@ public class ScreenBlockEntity extends BlockEntity {
             float vol = baseVol * (scr.ownerVolume / 100.0f);
 
             // Per-screen delta gate: skip JS push if vol hasn't changed enough since last push
-            // for THIS screen. Avoids hammering CEF with redundant evaluations.
-            if (Math.abs(scr.lastPushedVolume - vol) < 0.5f) continue;
+            // for THIS screen, unless the periodic refresh is due (see ScreenData.lastVolumePushMs).
+            long now = System.currentTimeMillis();
+            if (Math.abs(scr.lastPushedVolume - vol) < 0.5f && now - scr.lastVolumePushMs < VOLUME_REFRESH_MS) continue;
             scr.lastPushedVolume = vol;
+            scr.lastVolumePushMs = now;
 
             int volInt = (int) vol;
             int volFrac = ((int) (vol * 100.0f)) - volInt * 100;
@@ -725,6 +754,7 @@ public class ScreenBlockEntity extends BlockEntity {
                 scr.url = blacklisted ? WebDisplays.BLACKLIST_URL : url; //FIXME: This is an invalid fix for something that CANNOT be fixed
                 scr.videoType = VideoType.getTypeFromURL(scr.url);
                 ytVolume = Float.POSITIVE_INFINITY; //Force volume update
+                scr.lastPushedVolume = -1.0f;
 
                 if (blacklisted && scr.browser != null)
                     scr.browser.loadURL(WebDisplays.BLACKLIST_URL);

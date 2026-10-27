@@ -163,5 +163,6 @@
   "webdisplays.gui.screencfg.syncnow.tooltip": "Принудительно синхронизировать время с вашим клиентом.",
   "webdisplays.gui.screencfg.syncmaster": "Хост: %s",
   "webdisplays.gui.screencfg.syncmaster.none": "Хост: Нет",
-  "config.webdisplays.screen_brightness": "Яркость экрана"
+  "config.webdisplays.screen_brightness": "Яркость экрана",
+  "soundCategory.webdisplays.screens": "Экраны WebDisplays"
 }

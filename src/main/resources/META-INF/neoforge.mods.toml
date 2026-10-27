@@ -13,6 +13,11 @@ credits=""
 authors="${mod_authors}"
 description='''${mod_description}'''
 
+# MouseHandlerMixin and OverlayMixin are left out of webdisplays.mixins.json: this file was never
+# declared before, so they never ran, and OverlayMixin targets pre-1.21 Gui fields (would crash).
+[[mixins]]
+config="webdisplays.mixins.json"
+
 [[dependencies.${mod_id}]]
 modId="neoforge"
 type="required"

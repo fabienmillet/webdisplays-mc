@@ -99,12 +99,34 @@ public class ClientConfig {
 	@Name("audio_max_volume_percent")
 	@Comment({
 			"Maximum volume (0-100) screen audio will play at when at or below the full-volume distance.",
-			"Lower values cap the loudness of screens overall."
+			"Lower values cap the loudness of screens overall.",
+			"Also adjustable in game: Options > Music & Sounds > WebDisplays Screens."
 	})
 	@Translation("config.webdisplays.audio_max_volume_percent")
 	@DoubleRange(minV = 0, maxV = 100)
 	@Default(valueD = 100.0)
 	public static double audioMaxVolumePercent = 100.0;
+
+	@Name("audio_wall_occlusion")
+	@Comment({
+			"If true, screen audio is muffled when there is no line of sight between you and the screen",
+			"(i.e. solid blocks such as walls or closed doors are in the way). Lets neighbouring rooms",
+			"each play their own screen without hearing each other through the walls.",
+			"Glass counts as a wall. The screen's own blocks never count."
+	})
+	@Translation("config.webdisplays.audio_wall_occlusion")
+	@Default(valueBoolean = true)
+	public static boolean audioWallOcclusion = true;
+
+	@Name("audio_occluded_volume_percent")
+	@Comment({
+			"Percentage (0-100) of the normal volume kept when a screen is hidden behind walls.",
+			"0 = fully muted when you leave the room."
+	})
+	@Translation("config.webdisplays.audio_occluded_volume_percent")
+	@DoubleRange(minV = 0, maxV = 100)
+	@Default(valueD = 0.0)
+	public static double audioOccludedVolumePercent = 0.0;
 
 	@Comment({
 			"Options relating to input handling"
@@ -126,6 +148,11 @@ public class ClientConfig {
 		@DoubleRange(minV = 0, maxV = Double.MAX_VALUE)
 		@Default(valueD = 30)
 		public static boolean switchButtons = true;
+	}
+
+	/** In-game "WebDisplays Screens" volume slider (percent, 0-100). */
+	public static void setScreenVolume(double percent, boolean save) {
+		CFG.set("audio_max_volume_percent", percent, save);
 	}
 
 	@SuppressWarnings("unused")

@@ -133,6 +133,11 @@ public class SharedProxy {
         return false;
     }
 
+    /** Whether the local player is close enough for this screen to run a browser (client only). */
+    public boolean isInLoadRange(ScreenBlockEntity tes) {
+        return false;
+    }
+
     public double distanceTo(ScreenBlockEntity tes, Vec3 position) {
         double dist = Double.POSITIVE_INFINITY;
         for (int i = 0; i < tes.screenCount(); i++) {

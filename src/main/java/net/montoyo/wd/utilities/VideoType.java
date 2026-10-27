@@ -194,7 +194,7 @@ public enum VideoType {
     // Now wraps in try/catch and prepends the player base, matching getSeekJS / getPlayPauseJS pattern.
     @Nonnull
     public String getVolumeJSQuery(int volInt, int volFrac) {
-        String vol = volInt + "." + volFrac;
+        String vol = volInt + "." + (volFrac < 10 ? "0" : "") + volFrac;
         if (this == YOUTUBE || this == YOUTUBE_EMBED) {
             // YouTube setVolume takes 0-100 integer (decimals are rounded down).
             // Chain to genericHTML5JS so embedded media (the embedded player IS a video element)
@@ -221,7 +221,14 @@ public enum VideoType {
      */
     @Nonnull
     public static String genericMediaVolumeJS(String volStr) {
+        // window.__wdVol + capture listeners: media elements created or started after this push
+        // (page still loading, player swapping elements) get the right volume as soon as they
+        // play, instead of starting at 100% until the next push.
         return "(function(){try{" +
+               "window.__wdVol=" + volStr + "/100;" +
+               "if(!window.__wdVolHook){window.__wdVolHook=true;" +
+               "var h=function(e){var t=e.target;if(t&&(t.tagName==='VIDEO'||t.tagName==='AUDIO')){try{t.volume=window.__wdVol;}catch(x){}}};" +
+               "document.addEventListener('play',h,true);document.addEventListener('loadedmetadata',h,true);}" +
                "var els=document.querySelectorAll('video,audio');" +
                "for(var i=0;i<els.length;i++){try{els[i].volume=" + volStr + "/100;}catch(e){}}" +
                "var ifr=document.querySelectorAll('iframe');" +

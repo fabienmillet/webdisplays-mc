@@ -57,6 +57,10 @@ public class ScreenData {
     // Used by ScreenBlockEntity.updateTrackDistance to avoid re-pushing JS when volume
     // hasn't changed perceptibly. Not serialized (always recomputed on first push).
     public float lastPushedVolume = -1.0f;
+    // CLIENT-SIDE: when we last pushed volume JS. The push is repeated periodically even if the
+    // volume didn't change, because pages load asynchronously and players (re)create their
+    // <video> elements at will — a single push can land before the element exists.
+    public long lastVolumePushMs = 0;
 
     public int mouseType;
 
@@ -257,6 +261,8 @@ public class ScreenData {
     public void createBrowser(ScreenBlockEntity be, boolean doAnim) {
         if (WebDisplays.PROXY instanceof ClientProxy) {
             browser = WDBrowser.createBrowser(WebDisplays.applyBlacklist(url != null ? url : "https://www.google.com"), false);
+            // Fresh browser starts at 100% volume: forget what we pushed to the previous one.
+            lastPushedVolume = -1.0f;
 
             // set screen
             if (browser instanceof MCEFBrowser mcefBrowser) {
